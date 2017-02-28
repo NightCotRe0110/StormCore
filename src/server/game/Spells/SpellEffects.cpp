@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2014-2017 StormCore
+ * 
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -867,7 +868,10 @@ void Spell::EffectJump(SpellEffIndex /*effIndex*/)
 
     float speedXY, speedZ;
     CalculateJumpSpeeds(effectInfo, m_caster->GetExactDist2d(x, y), speedXY, speedZ);
-    m_caster->GetMotionMaster()->MoveJump(x, y, z, 0.0f, speedXY, speedZ, EVENT_JUMP, false, effectInfo->TriggerSpell, unitTarget->GetGUID());
+    JumpArrivalCastArgs arrivalCast;
+	arrivalCast.SpellId = effectInfo->TriggerSpell;
+	arrivalCast.Target = unitTarget->GetGUID();
+	m_caster->GetMotionMaster()->MoveJump(x, y, z, 0.0f, speedXY, speedZ, EVENT_JUMP, false, &arrivalCast);
 }
 
 void Spell::EffectJumpDest(SpellEffIndex /*effIndex*/)
@@ -883,7 +887,9 @@ void Spell::EffectJumpDest(SpellEffIndex /*effIndex*/)
 
     float speedXY, speedZ;
     CalculateJumpSpeeds(effectInfo, m_caster->GetExactDist2d(destTarget), speedXY, speedZ);
-    m_caster->GetMotionMaster()->MoveJump(*destTarget, speedXY, speedZ, EVENT_JUMP, true, effectInfo->TriggerSpell);
+    JumpArrivalCastArgs arrivalCast;
+	arrivalCast.SpellId = effectInfo->TriggerSpell;
+	m_caster->GetMotionMaster()->MoveJump(*destTarget, speedXY, speedZ, EVENT_JUMP, !m_targets.GetObjectTargetGUID().IsEmpty(), &arrivalCast);
 }
 
 void Spell::CalculateJumpSpeeds(SpellEffectInfo const* effInfo, float dist, float& speedXY, float& speedZ)
@@ -1516,6 +1522,8 @@ void Spell::EffectCreateItem2(SpellEffIndex effIndex)
         }
         else
             player->AutoStoreLoot(m_spellInfo->Id, LootTemplates_Spell);    // create some random items
+		
+		player->UpdateCraftSkill(m_spellInfo->Id);
     }
     /// @todo ExecuteLogEffectCreateItem(i, m_spellInfo->Effects[i].ItemType);
 }
@@ -3157,7 +3165,7 @@ void Spell::EffectSummonObjectWild(SpellEffIndex effIndex)
 
     Map* map = target->GetMap();
 
-    if (!pGameObj->Create(gameobject_id, map, m_caster->GetPhaseMask(), x, y, z, target->GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, 100, GO_STATE_READY))
+    if (!pGameObj->Create(gameobject_id, map, m_caster->GetPhaseMask(), Position(x, y, z, target->GetOrientation()), G3D::Quat(), 255, GO_STATE_READY))
     {
         delete pGameObj;
         return;
@@ -3183,7 +3191,7 @@ void Spell::EffectSummonObjectWild(SpellEffIndex effIndex)
     if (uint32 linkedEntry = pGameObj->GetGOInfo()->GetLinkedGameObjectEntry())
     {
         GameObject* linkedGO = new GameObject;
-        if (linkedGO->Create(linkedEntry, map, m_caster->GetPhaseMask(), x, y, z, target->GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, 100, GO_STATE_READY))
+        if (linkedGO->Create(linkedEntry, map, m_caster->GetPhaseMask(), Position(x, y, z, target->GetOrientation()), G3D::Quat(), 255, GO_STATE_READY))
         {
             linkedGO->CopyPhaseFrom(m_caster);
 
@@ -3776,12 +3784,16 @@ void Spell::EffectDuel(SpellEffIndex effIndex)
 
     uint32 gameobject_id = effectInfo->MiscValue;
 
-    Map* map = m_caster->GetMap();
-    if (!pGameObj->Create(gameobject_id, map, 0,
-        m_caster->GetPositionX()+(unitTarget->GetPositionX()-m_caster->GetPositionX())/2,
-        m_caster->GetPositionY()+(unitTarget->GetPositionY()-m_caster->GetPositionY())/2,
+    Position const pos =
+    {
+        m_caster->GetPositionX() + (unitTarget->GetPositionX() - m_caster->GetPositionX()) / 2,
+        m_caster->GetPositionY() + (unitTarget->GetPositionY() - m_caster->GetPositionY()) / 2,
         m_caster->GetPositionZ(),
-        m_caster->GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, 0, GO_STATE_READY))
+        m_caster->GetOrientation()
+    };
+
+    Map* map = m_caster->GetMap();
+    if (!pGameObj->Create(gameobject_id, map, m_caster->GetPhaseMask(), pos, G3D::Quat(), 0, GO_STATE_READY))
     {
         delete pGameObj;
         return;
@@ -4116,7 +4128,7 @@ void Spell::EffectSummonObject(SpellEffIndex effIndex)
         m_caster->GetClosePoint(x, y, z, DEFAULT_WORLD_OBJECT_SIZE);
 
     Map* map = m_caster->GetMap();
-    if (!go->Create(go_id, map, 0, x, y, z, m_caster->GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, 0, GO_STATE_READY))
+    if (!go->Create(go_id, map, m_caster->GetPhaseMask(), Position(x, y, z, m_caster->GetOrientation()), G3D::Quat(), 255, GO_STATE_READY))
     {
         delete go;
         return;
@@ -4739,6 +4751,16 @@ void Spell::EffectTransmitted(SpellEffIndex effIndex)
 
     uint32 name_id = effectInfo->MiscValue;
 
+    Unit::AuraEffectList const& overrideSummonedGameObjects = m_caster->GetAuraEffectsByType(SPELL_AURA_OVERRIDE_SUMMONED_OBJECT);
+    for (AuraEffect const* aurEff : overrideSummonedGameObjects)
+    {
+        if (uint32(aurEff->GetMiscValue()) == name_id)
+        {
+            name_id = uint32(aurEff->GetMiscValueB());
+            break;
+        }
+    }
+
     GameObjectTemplate const* goinfo = sObjectMgr->GetGameObjectTemplate(name_id);
 
     if (!goinfo)
@@ -4774,7 +4796,7 @@ void Spell::EffectTransmitted(SpellEffIndex effIndex)
 
     GameObject* pGameObj = new GameObject;
 
-    if (!pGameObj->Create(name_id, cMap, 0, fx, fy, fz, m_caster->GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, 100, GO_STATE_READY))
+    if (!pGameObj->Create(name_id, cMap, m_caster->GetPhaseMask(), Position(fx, fy, fz, m_caster->GetOrientation()), G3D::Quat(), 255, GO_STATE_READY))
     {
         delete pGameObj;
         return;
@@ -4841,7 +4863,7 @@ void Spell::EffectTransmitted(SpellEffIndex effIndex)
     if (uint32 linkedEntry = pGameObj->GetGOInfo()->GetLinkedGameObjectEntry())
     {
         GameObject* linkedGO = new GameObject;
-        if (linkedGO->Create(linkedEntry, cMap, 0, fx, fy, fz, m_caster->GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, 100, GO_STATE_READY))
+        if (linkedGO->Create(linkedEntry, cMap, m_caster->GetPhaseMask(), Position(fx, fy, fz, m_caster->GetOrientation()), G3D::Quat(), 255, GO_STATE_READY))
         {
             linkedGO->CopyPhaseFrom(m_caster);
 
@@ -5293,23 +5315,7 @@ void Spell::SummonGuardian(uint32 i, uint32 entry, SummonPropertiesEntry const* 
                     level = skill202 / 5;
 
     float radius = 5.0f;
-
-    int32 duration = m_spellInfo->CalcDuration(m_caster);
-    switch (m_spellInfo->Id)
-    {
-        case 101643: /// Transencence
-            for (Unit::ControlList::const_iterator itr = m_originalCaster->m_Controlled.begin(); itr != m_originalCaster->m_Controlled.end(); ++itr)
-            {
-                if ((*itr)->GetEntry() == 54569)
-                {
-                    ((Creature*)(*itr))->DespawnOrUnsummon();
-                    break;
-                }
-            }
-            break;
-        default:
-            break;
-    }
+    int32 duration = m_spellInfo->CalcDuration(m_originalCaster);
 
     //TempSummonType summonType = (duration == 0) ? TEMPSUMMON_DEAD_DESPAWN : TEMPSUMMON_TIMED_DESPAWN;
     Map* map = caster->GetMap();
@@ -5326,17 +5332,6 @@ void Spell::SummonGuardian(uint32 i, uint32 entry, SummonPropertiesEntry const* 
         TempSummon* summon = map->SummonCreature(entry, pos, properties, duration, caster, m_spellInfo->Id);
         if (!summon)
             return;
-
-        // Transcendence shouldn't be initialized twice
-        if (summon->GetEntry() == 54569)
-        {
-            summon->SetOwnerGUID(m_originalCaster->GetGUID());
-            summon->SetCreatorGUID(m_originalCaster->GetGUID());
-            summon->setFaction(m_originalCaster->getFaction());
-            summon->SetUInt32Value(UNIT_CREATED_BY_SPELL, m_spellInfo->Id);
-            ExecuteLogEffectSummonObject(i, summon);
-            return;
-        }
 
         if (summon->HasUnitTypeMask(UNIT_MASK_GUARDIAN))
             ((Guardian*)summon)->InitStatsForLevel(level);

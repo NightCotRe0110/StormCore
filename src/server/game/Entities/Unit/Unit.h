@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2017 StormCore
+ * Copyright (C) 2014-2017 StormCore (credits:zydrax)
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -1681,7 +1681,7 @@ class TC_GAME_API Unit : public WorldObject
         void UpdateHeight(float newZ);
 
         void SendMoveKnockBack(Player* player, float speedXY, float speedZ, float vcos, float vsin);
-        void KnockbackFrom(float x, float y, float speedXY, float speedZ);
+        void KnockbackFrom(float x, float y, float speedXY, float speedZ, Movement::SpellEffectExtraData const* spellEffectExtraData = nullptr);
         void JumpTo(float speedXY, float speedZ, bool forward = true);
         void JumpTo(WorldObject* obj, float speedZ, bool withOrientation = false);
 
@@ -1968,6 +1968,8 @@ class TC_GAME_API Unit : public WorldObject
         void SetShapeshiftForm(ShapeshiftForm form);
 
         bool IsInFeralForm() const;
+		        bool IsInTravelForm() const;
+				bool IsTravelForm(ShapeshiftForm form) const;
 
         bool IsInDisallowedMountForm() const;
 

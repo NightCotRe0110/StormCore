@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2014-2017 StormCore
+ * Copyright (C) 2014-2017 StormCore (credits:zydrax)
+ * 
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -649,6 +650,17 @@ uint32 Unit::DealDamage(Unit* victim, uint32 damage, CleanDamage const* cleanDam
         }
         else
             victim->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TAKE_DAMAGE, 0);
+
+       // interrupt spells with SPELL_INTERRUPT_FLAG_ABORT_ON_DMG on absorbed damage (no dots)
+       if (!damage && damagetype != DOT && cleanDamage && cleanDamage->absorbed_damage)
+           if (victim != this && victim->GetTypeId() == TYPEID_PLAYER)
+               if (Spell* spell = victim->m_currentSpells[CURRENT_GENERIC_SPELL])
+                   if (spell->getState() == SPELL_STATE_PREPARING)
+                   {
+                       uint32 interruptFlags = spell->m_spellInfo->InterruptFlags;
+                       if ((interruptFlags & SPELL_INTERRUPT_FLAG_ABORT_ON_DMG) != 0)
+                           victim->InterruptNonMeleeSpells(false);
+                   }
 
         // We're going to call functions which can modify content of the list during iteration over it's elements
         // Let's copy the list so we can prevent iterator invalidation
@@ -1303,7 +1315,8 @@ void Unit::DealMeleeDamage(CalcDamageInfo* damageInfo, bool durabilityLoss)
     if (damageInfo->blocked_amount && damageInfo->TargetState != VICTIMSTATE_BLOCKS)
         victim->HandleEmoteCommand(EMOTE_ONESHOT_PARRY_SHIELD);
 
-    if (damageInfo->TargetState == VICTIMSTATE_PARRY)
+    if (damageInfo->TargetState == VICTIMSTATE_PARRY &&
+        (GetTypeId() != TYPEID_UNIT || (ToCreature()->GetCreatureTemplate()->flags_extra & CREATURE_FLAG_EXTRA_NO_PARRY_HASTEN) == 0))
     {
         // Get attack timers
         float offtime  = float(victim->getAttackTimer(OFF_ATTACK));
@@ -2164,7 +2177,7 @@ float Unit::CalculateLevelPenalty(SpellInfo const* spellProto) const
     float LvlPenalty = 0.0f;
 
     if (spellProto->SpellLevel < 20)
-        LvlPenalty = 20.0f - spellProto->SpellLevel * 3.75f;
+        LvlPenalty = (20.0f - spellProto->SpellLevel) * 3.75f;
     float LvlFactor = (float(spellProto->SpellLevel) + 6.0f) / float(getLevel());
     if (LvlFactor > 1.0f)
         LvlFactor = 1.0f;
@@ -2277,37 +2290,19 @@ SpellMissInfo Unit::MeleeSpellHitResult(Unit* victim, SpellInfo const* spellInfo
     if (roll < tmp)
         return SPELL_MISS_MISS;
 
-    // Chance resist mechanic (select max value from every mechanic spell effect)
-    int32 resist_mech = 0;
-    // Get effects mechanic and chance
-    for (uint8 eff = 0; eff < MAX_SPELL_EFFECTS; ++eff)
-    {
-        int32 effect_mech = spellInfo->GetEffectMechanic(eff, GetMap()->GetDifficultyID());
-        if (effect_mech)
-        {
-            int32 temp = victim->GetTotalAuraModifierByMiscValue(SPELL_AURA_MOD_MECHANIC_RESISTANCE, effect_mech);
-            if (resist_mech < temp * 100)
-                resist_mech = temp * 100;
-        }
-    }
-    // Roll chance
-    tmp += resist_mech;
-    if (roll < tmp)
-        return SPELL_MISS_RESIST;
-
-    bool canDodge = true;
-    bool canParry = true;
-    bool canBlock = spellInfo->HasAttribute(SPELL_ATTR3_BLOCKABLE_SPELL);
-
-    // Same spells cannot be parry/dodge
-    if (spellInfo->HasAttribute(SPELL_ATTR0_IMPOSSIBLE_DODGE_PARRY_BLOCK))
-        return SPELL_MISS_NONE;
-
     // Chance resist mechanic
     int32 resist_chance = victim->GetMechanicResistChance(spellInfo) * 100;
     tmp += resist_chance;
     if (roll < tmp)
         return SPELL_MISS_RESIST;
+
+    // Same spells cannot be parried/dodged
+    if (spellInfo->HasAttribute(SPELL_ATTR0_IMPOSSIBLE_DODGE_PARRY_BLOCK))
+        return SPELL_MISS_NONE;
+
+    bool canDodge = true;
+    bool canParry = true;
+    bool canBlock = spellInfo->HasAttribute(SPELL_ATTR3_BLOCKABLE_SPELL);
 
     // Ranged attacks can only miss, resist and deflect
     if (attType == RANGED_ATTACK)
@@ -6380,7 +6375,7 @@ bool Unit::HandleProcTriggerSpell(Unit* victim, uint32 damage, AuraEffect* trigg
         case 65081:
         {
             // Proc only from PW:S cast
-            if (!(procSpell->SpellFamilyFlags[0] & 0x00000001))
+            if (!procSpell || !(procSpell->SpellFamilyFlags[0] & 0x00000001))
                 return false;
             break;
         }
@@ -6815,6 +6810,9 @@ bool Unit::Attack(Unit* victim, bool meleeAttack)
 
         ToCreature()->SendAIReaction(AI_REACTION_HOSTILE);
         ToCreature()->CallAssistance();
+
+        // Remove emote state - will be restored on creature reset
+        SetUInt32Value(UNIT_NPC_EMOTESTATE, EMOTE_ONESHOT_NONE);
     }
 
     // delay offhand weapon attack to next attack time
@@ -8042,12 +8040,12 @@ int32 Unit::SpellBaseDamageBonusTaken(SpellSchoolMask schoolMask) const
     return TakenAdvertisedBenefit;
 }
 
-bool Unit::IsSpellCrit(Unit* victim, SpellInfo const* spellProto, SpellSchoolMask schoolMask, WeaponAttackType attackType) const
+bool Unit::IsSpellCrit(Unit* victim, SpellInfo const* spellProto, SpellSchoolMask schoolMask, WeaponAttackType attackType /*= BASE_ATTACK*/) const
 {
     return roll_chance_f(GetUnitSpellCriticalChance(victim, spellProto, schoolMask, attackType));
 }
 
-float Unit::GetUnitSpellCriticalChance(Unit* victim, SpellInfo const* spellProto, SpellSchoolMask schoolMask, WeaponAttackType attackType) const
+float Unit::GetUnitSpellCriticalChance(Unit* victim, SpellInfo const* spellProto, SpellSchoolMask schoolMask, WeaponAttackType attackType /*= BASE_ATTACK*/) const
 {
     //! Mobs can't crit with spells. Player Totems can
     //! Fire Elemental (from totem) can too - but this part is a hack and needs more research
@@ -8211,10 +8209,10 @@ float Unit::GetUnitSpellCriticalChance(Unit* victim, SpellInfo const* spellProto
     if (Player* modOwner = GetSpellModOwner())
         modOwner->ApplySpellMod(spellProto->Id, SPELLMOD_CRITICAL_CHANCE, crit_chance);
 
-    AuraEffectList const& critAuras = victim->GetAuraEffectsByType(SPELL_AURA_MOD_CRIT_CHANCE_FOR_CASTER);
-    for (AuraEffectList::const_iterator i = critAuras.begin(); i != critAuras.end(); ++i)
-        if ((*i)->GetCasterGUID() == GetGUID() && (*i)->IsAffectingSpell(spellProto))
-            crit_chance += (*i)->GetAmount();
+    AuraEffectList const& critChanceForCaster = victim->GetAuraEffectsByType(SPELL_AURA_MOD_CRIT_CHANCE_FOR_CASTER);
+    for (AuraEffect const* aurEff : critChanceForCaster)
+        if (aurEff->GetCasterGUID() == GetGUID() && aurEff->IsAffectingSpell(spellProto))
+            crit_chance += aurEff->GetAmount();
 
     return crit_chance > 0.0f ? crit_chance : 0.0f;
 }
@@ -9273,7 +9271,7 @@ bool Unit::isTargetableForAttack(bool checkFakeDeath) const
         return false;
 
     if (HasFlag(UNIT_FIELD_FLAGS,
-        UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_NOT_SELECTABLE | UNIT_FLAG_IMMUNE_TO_PC))
+        UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_NOT_SELECTABLE))
         return false;
 
     if (GetTypeId() == TYPEID_PLAYER && ToPlayer()->IsGameMaster())
@@ -10572,6 +10570,17 @@ bool Unit::IsInFeralForm() const
     return form == FORM_CAT_FORM || form == FORM_BEAR_FORM || form == FORM_DIRE_BEAR_FORM || form == FORM_GHOST_WOLF;
 }
 
+bool Unit::IsInTravelForm() const
+ {
+	ShapeshiftForm form = GetShapeshiftForm();
+	return IsTravelForm(form);
+	}
+
+bool Unit::IsTravelForm(ShapeshiftForm form) const
+ {
+	return form == FORM_TRAVEL_FORM || form == FORM_AQUATIC_FORM || form == FORM_FLIGHT_FORM || form == FORM_FLIGHT_FORM_EPIC;
+	}
+
 bool Unit::IsInDisallowedMountForm() const
 {
     if (SpellInfo const* transformSpellInfo = sSpellMgr->GetSpellInfo(getTransForm()))
@@ -11723,9 +11732,8 @@ void Unit::ProcDamageAndSpellFor(bool isVictim, Unit* target, uint32 procFlag, u
 
         bool prepare = i->aura->CallScriptPrepareProcHandlers(aurApp, eventInfo);
 
-        // For players set spell cooldown if need
         Milliseconds cooldown = Milliseconds::zero();
-        if (prepare && GetTypeId() == TYPEID_PLAYER)
+        if (prepare)
         {
             cooldown = Milliseconds(spellInfo->ProcCooldown);
             if (i->spellProcEvent && i->spellProcEvent->cooldown)
@@ -14072,7 +14080,7 @@ void Unit::SendMoveKnockBack(Player* player, float speedXY, float speedZ, float 
     player->GetSession()->SendPacket(moveKnockBack.Write());
 }
 
-void Unit::KnockbackFrom(float x, float y, float speedXY, float speedZ)
+void Unit::KnockbackFrom(float x, float y, float speedXY, float speedZ, Movement::SpellEffectExtraData const* spellEffectExtraData /*= nullptr*/)
 {
     Player* player = ToPlayer();
     if (!player)
@@ -14086,7 +14094,7 @@ void Unit::KnockbackFrom(float x, float y, float speedXY, float speedZ)
     }
 
     if (!player)
-        GetMotionMaster()->MoveKnockbackFrom(x, y, speedXY, speedZ);
+        GetMotionMaster()->MoveKnockbackFrom(x, y, speedXY, speedZ, spellEffectExtraData);
     else
     {
         float vcos, vsin;
@@ -14517,8 +14525,10 @@ uint32 Unit::GetModelForForm(ShapeshiftForm form) const
                 break;
             }
             case FORM_GHOST_WOLF:
+            {
                 if (HasAura(58135)) // Glyph of Spectral Wolf
-                    return 27312;
+                    return 60247;
+            }
             default:
                 break;
         }
